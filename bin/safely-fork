@@ -173,10 +173,10 @@ if [ -n "$existing" ]; then
   fi
 else
   # 走 REST API 而不是 gh repo fork：显式 default_branch_only=false，
-  # 复制全部分支（gh repo fork 默认只复制默认分支）
-  fork_args=(-F default_branch_only=false)
+  # 复制全部分支（gh repo fork 默认只复制默认分支）。
+  # name 必须始终传：REST API 不传 name 时会用原仓库名创建 fork。
+  fork_args=(-F default_branch_only=false -F name="$FORK_REPO")
   [ -n "$FORK_ORG" ] && fork_args+=(-F organization="$FORK_ORG") || true
-  [ -n "$FORK_NAME" ] && fork_args+=(-F name="$FORK_NAME") || true
   if [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] 将执行: gh api -X POST repos/$REPO/forks ${fork_args[*]}（复制全部分支）"
   else
