@@ -30,6 +30,7 @@ gh auth login        # 确保已登录
 
 ```bash
 # 最简：fork octocat/Hello-World 并全自动配置
+# fork 会复制全部分支（不是"Copy the main branch only"），并打上 safelyfork topic
 ./bin/safely-fork octocat/Hello-World
 
 # fork 到组织，重命名，完成后触发一次测试运行
@@ -52,6 +53,8 @@ gh auth login        # 确保已登录
 | `--dry-run` | 只打印将执行的操作，不做任何修改 |
 
 工具幂等：重复运行会复用已有 fork、更新 workflow 文件而不是报错。
+
+默认行为：fork 复制**全部分支**（显式传 `default_branch_only=false`，不受网页端"Copy the main branch only"默认勾选影响），并给 fork 添加 `safelyfork` topic（GitHub topic 会规范化为小写；已有的其他 topics 会保留）。
 
 ## 关于 FORK_SYNC_PAT
 

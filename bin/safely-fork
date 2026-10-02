@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # safely-fork —— 为指定 GitHub 仓库创建一个"安全的 fork"：
-#   1. fork 原仓库
-#   2. 把 safely-fork.yml（定时安全同步上游的 workflow）推入 fork
-#   3. 在 fork 上启用 GitHub Actions
-#   4. 启用 safely-fork workflow（并可选触发一次测试运行）
+#   1. fork 原仓库（复制全部分支，不受"Copy the main branch only"影响）
+#   2. 给 fork 添加 safelyfork topic
+#   3. 把 safely-fork.yml（定时安全同步上游的 workflow）推入 fork
+#   4. 在 fork 上启用 GitHub Actions 并启用该 workflow
 #
 # 依赖：gh（已登录，需要 repo + workflow scope）、jq、base64。
 #
@@ -43,26 +43,27 @@ usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 usage_die() { usage >&2; exit 1; }
 
-# gh api 包装：任何非 2xx 都带状态码报错退出
-api() {
+# gh api 包装。必须直接调用（不要放在 $( ) 里），否则本函数所在子 shell
+# 退出后全局变量会丢失。结果通过全局变量返回：
+#   API_BODY   响应体（失败时是 gh 的错误输出）
+#   API_STATUS HTTP 状态码（无法解析时为 0）
+#   API_ERROR  失败时的错误信息
+run_api() {
   local method="$1" endpoint="$2"; shift 2
-  local out rc
-  out=$(gh api -X "$method" "$endpoint" "$@" 2>&1); rc=$?
-  if [ $rc -ne 0 ]; then
-    # gh api 的错误输出形如 "gh: Not Found (HTTP 404)"
-    if [[ "$out" == *"(HTTP 404)"* ]]; then
-      API_STATUS=404
-    elif [[ "$out" =~ \(HTTP\ ([0-9]+)\) ]]; then
-      API_STATUS="${BASH_REMATCH[1]}"
-    else
-      API_STATUS=0
-    fi
-    API_ERROR="$out"
-    return $rc
-  fi
+  API_BODY=$(gh api -X "$method" "$endpoint" "$@" 2>&1)
+  API_RC=$?
   API_STATUS=0
   API_ERROR=""
-  printf '%s' "$out"
+  if [ "$API_RC" -ne 0 ]; then
+    if [[ "$API_BODY" == *"(HTTP 404)"* ]]; then
+      API_STATUS=404
+    elif [[ "$API_BODY" =~ \(HTTP\ ([0-9]+)\) ]]; then
+      API_STATUS="${BASH_REMATCH[1]}"
+    fi
+    API_ERROR="$API_BODY"
+    return "$API_RC"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------- 参数解析
@@ -114,7 +115,7 @@ done
 gh auth status >/dev/null 2>&1 || die "gh 未登录，请先运行: gh auth login（需要 repo + workflow scope）"
 
 if [ ! -f "$WORKFLOW_FILE" ]; then
-  die "workflow 文件不存在: $WORKFLOW_FILE"
+  die "workflow 文件不存在: ${WORKFLOW_FILE}"
 fi
 WORKFLOW_CONTENT_B64=$(base64 < "$WORKFLOW_FILE" | tr -d '\n')
 
@@ -140,12 +141,14 @@ if [ "$DRY_RUN" -eq 1 ]; then
   info "[dry-run] 将执行: gh api repos/$REPO"
   SRC_BRANCH="main"
 else
-  out=$(api GET "repos/$REPO") || {
-    [ "$API_STATUS" = "404" ] && die "仓库不存在或无权访问: $REPO"
-    die "访问 $REPO 失败: $API_ERROR"
+  run_api GET "repos/$REPO" || {
+    if [ "$API_STATUS" = "404" ]; then
+      die "仓库不存在或无权访问: ${REPO}"
+    fi
+    die "访问 $REPO 失败: ${API_ERROR}"
   }
-  SRC_BRANCH=$(printf '%s' "$out" | jq -r .default_branch)
-  SRC_NAME=$(printf '%s' "$out" | jq -r .name)
+  SRC_BRANCH=$(printf '%s' "$API_BODY" | jq -r .default_branch)
+  SRC_NAME=$(printf '%s' "$API_BODY" | jq -r .name)
   FORK_REPO="${FORK_NAME:-${SRC_NAME}-SafelyFork}"
   FORK="${FORK_OWNER}/${FORK_REPO}"
   ok "源仓库默认分支: $SRC_BRANCH"
@@ -156,7 +159,9 @@ fi
 step "创建 fork $FORK"
 existing=""
 if [ "$DRY_RUN" -eq 0 ]; then
-  existing=$(api GET "repos/$FORK" 2>/dev/null || true)
+  if run_api GET "repos/$FORK"; then
+    existing="$API_BODY"
+  fi
 fi
 
 if [ -n "$existing" ]; then
@@ -164,18 +169,52 @@ if [ -n "$existing" ]; then
   if [ "$parent" = "$REPO" ]; then
     ok "fork 已存在且指向 ${REPO}，直接复用"
   else
-    die "仓库 $FORK 已存在，但不是 $REPO 的 fork（parent: ${parent:-无}），请换用 --fork-name"
+    die "仓库 $FORK 已存在，但不是 ${REPO} 的 fork（parent: ${parent:-无}），请换用 --fork-name"
   fi
 else
-  fork_args=(--clone=false)
-  [ -n "$FORK_ORG" ] && fork_args+=(--org "$FORK_ORG") || true
-  [ -n "$FORK_NAME" ] && fork_args+=(--fork-name "$FORK_NAME") || true
+  # 走 REST API 而不是 gh repo fork：显式 default_branch_only=false，
+  # 复制全部分支（gh repo fork 默认只复制默认分支）
+  fork_args=(-F default_branch_only=false)
+  [ -n "$FORK_ORG" ] && fork_args+=(-F organization="$FORK_ORG") || true
+  [ -n "$FORK_NAME" ] && fork_args+=(-F name="$FORK_NAME") || true
   if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] 将执行: gh repo fork $REPO ${fork_args[*]}"
+    info "[dry-run] 将执行: gh api -X POST repos/$REPO/forks ${fork_args[*]}（复制全部分支）"
   else
-    gh repo fork "$REPO" "${fork_args[@]}"
-    ok "fork 已创建"
+    run_api POST "repos/$REPO/forks" "${fork_args[@]}" || die "创建 fork 失败: ${API_ERROR}"
+    # fork 异步创建，刚返回 202 时还查不到，轮询等待就绪
+    ready=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      if run_api GET "repos/$FORK"; then ready=1; break; fi
+      info "等待 fork 创建完成…"; sleep 5
+    done
+    [ "$ready" -eq 1 ] || die "fork 创建超时: ${API_ERROR:-请到 https://github.com/$FORK 手动确认}"
+    ok "fork 已创建（包含全部分支）"
   fi
+fi
+
+# ---------------------------------------------------------------- Topic
+
+step "添加 safelyfork topic"
+if [ "$DRY_RUN" -eq 1 ]; then
+  info "[dry-run] 将执行: PUT /repos/$FORK/topics（合并现有 topics + safelyfork）"
+else
+  run_api GET "repos/$FORK" || die "读取 fork 信息失败: ${API_ERROR}"
+  topics=$(printf '%s' "$API_BODY" | jq -r '.topics // [] | join(" ")')
+  case " $topics " in
+    *" safelyfork "*)
+      ok "已有 safelyfork topic，跳过"
+      ;;
+    *)
+      topic_args=(-f "names[]=safelyfork")
+      for t in $topics; do
+        topic_args+=(-f "names[]=$t")
+      done
+      # PUT topics 是整体替换，必须带上现有 topics 一起提交
+      run_api PUT "repos/$FORK/topics" "${topic_args[@]}" >/dev/null \
+        || die "添加 topic 失败: ${API_ERROR}"
+      ok "已添加 topic: safelyfork"
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------- 推送 workflow
@@ -187,23 +226,30 @@ if [ "$DRY_RUN" -eq 1 ]; then
   info "[dry-run] 将执行: PUT /repos/$FORK/contents/${WORKFLOW_PATH}（内容来自 ${WORKFLOW_FILE}）"
 else
   # fork 创建后默认分支可能与源仓库不同步，以 fork 实际默认分支为准
-  out=$(api GET "repos/$FORK") || die "访问 fork $FORK 失败: $API_ERROR"
-  FORK_BRANCH=$(printf '%s' "$out" | jq -r .default_branch)
+  run_api GET "repos/$FORK" || die "访问 fork $FORK 失败: ${API_ERROR}"
+  FORK_BRANCH=$(printf '%s' "$API_BODY" | jq -r .default_branch)
 
-  existing_sha=$(api GET "repos/$FORK/contents/$WORKFLOW_PATH?ref=$FORK_BRANCH" 2>/dev/null | jq -r '.sha // empty' || true)
+  existing_sha=""
+  if run_api GET "repos/$FORK/contents/$WORKFLOW_PATH?ref=$FORK_BRANCH"; then
+    existing_sha=$(printf '%s' "$API_BODY" | jq -r '.sha // empty')
+  fi
 
   put_args=(-f message="chore: add safely-fork sync workflow" -f content="$WORKFLOW_CONTENT_B64" -f branch="$FORK_BRANCH")
   if [ -n "$existing_sha" ]; then
     put_args+=(-f sha="$existing_sha")
   fi
 
-  api PUT "repos/$FORK/contents/$WORKFLOW_PATH" "${put_args[@]}" >/dev/null || {
+  run_api PUT "repos/$FORK/contents/$WORKFLOW_PATH" "${put_args[@]}" >/dev/null || {
     if [[ "$API_ERROR" == *"workflow"* ]] || [ "$API_STATUS" = "422" ]; then
       warn "推送失败（${API_STATUS}）。当前 gh 令牌可能缺少 workflow scope，请运行: gh auth refresh -s workflow 后重试"
     fi
-    die "推送 workflow 失败: $API_ERROR"
+    die "推送 workflow 失败: ${API_ERROR}"
   }
-  [ -n "$existing_sha" ] && ok "workflow 已更新" || ok "workflow 已创建"
+  if [ -n "$existing_sha" ]; then
+    ok "workflow 已更新"
+  else
+    ok "workflow 已创建"
+  fi
 fi
 
 # ---------------------------------------------------------------- 启用 Actions
@@ -212,7 +258,7 @@ step "在 fork 上启用 Actions"
 if [ "$DRY_RUN" -eq 1 ]; then
   info "[dry-run] 将执行: PUT /repos/$FORK/actions/permissions {enabled: true}"
 else
-  api PUT "repos/$FORK/actions/permissions" -F enabled=true -f allowed_actions=all >/dev/null || {
+  run_api PUT "repos/$FORK/actions/permissions" -F enabled=true -f allowed_actions=all >/dev/null || {
     warn "启用 Actions 失败（HTTP ${API_STATUS}）。个人 fork 一般可成功；组织 fork 可能受组织策略限制。"
     die "$API_ERROR"
   }
@@ -228,17 +274,21 @@ else
   # 刚推送的 workflow 需要几秒才会注册，轮询等待
   registered=0
   for _ in 1 2 3 4 5 6; do
-    if api GET "repos/$FORK/actions/workflows/$WORKFLOW_NAME" >/dev/null 2>&1; then
+    if run_api GET "repos/$FORK/actions/workflows/$WORKFLOW_NAME"; then
       registered=1; break
     fi
     info "等待 workflow 注册…"; sleep 5
   done
-  [ "$registered" -eq 1 ] || die "workflow $WORKFLOW_NAME 未在 GitHub 上注册成功，请到 Actions 页面手动排查"
+  [ "$registered" -eq 1 ] || die "workflow ${WORKFLOW_NAME} 未在 GitHub 上注册成功，请到 Actions 页面手动排查"
 
-  api PUT "repos/$FORK/actions/workflows/$WORKFLOW_NAME/enable" >/dev/null || die "启用 workflow 失败: $API_ERROR"
+  run_api PUT "repos/$FORK/actions/workflows/$WORKFLOW_NAME/enable" >/dev/null \
+    || die "启用 workflow 失败: ${API_ERROR}"
 
-  state=$(api GET "repos/$FORK/actions/workflows/$WORKFLOW_NAME" | jq -r .state)
-  [ "$state" = "active" ] || warn "workflow 状态为 ${state}（预期 active），请到 Actions 页面确认"
+  run_api GET "repos/$FORK/actions/workflows/$WORKFLOW_NAME"
+  state=$(printf '%s' "$API_BODY" | jq -r .state)
+  if [ "$state" != "active" ]; then
+    warn "workflow 状态为 ${state}（预期 active），请到 Actions 页面确认"
+  fi
   ok "workflow 已启用（state: ${state}）"
 fi
 
@@ -249,8 +299,8 @@ if [ "$DO_DISPATCH" -eq 1 ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] 将执行: POST /repos/$FORK/actions/workflows/$WORKFLOW_NAME/dispatches {ref: $SRC_BRANCH}"
   else
-    api POST "repos/$FORK/actions/workflows/$WORKFLOW_NAME/dispatches" -f ref="$FORK_BRANCH" >/dev/null \
-      || die "触发运行失败: $API_ERROR"
+    run_api POST "repos/$FORK/actions/workflows/$WORKFLOW_NAME/dispatches" -f ref="$FORK_BRANCH" >/dev/null \
+      || die "触发运行失败: ${API_ERROR}"
     ok "已触发，运行状态见 https://github.com/$FORK/actions"
   fi
 fi
