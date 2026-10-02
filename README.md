@@ -44,7 +44,7 @@ gh auth login        # 确保已登录
 | 选项 | 说明 |
 |---|---|
 | `--org <org>` | fork 到指定组织（默认 fork 到当前账号） |
-| `--fork-name <name>` | 重命名 fork（默认沿用原仓库名） |
+| `--fork-name <name>` | 重命名 fork（默认：`原仓库名-SafelyFork`） |
 | `--workflow-file <path>` | 要推入的 workflow 文件（默认本仓库的 `safely-fork.yml`） |
 | `--workflow-name <name>` | 在 fork 中保存的文件名（默认 `safely-fork.yml`） |
 | `--dispatch` | 完成后立即触发一次 workflow 测试运行 |

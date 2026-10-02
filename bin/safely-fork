@@ -9,7 +9,7 @@
 #
 # 用法：safely-fork <owner/repo> [选项]
 #   --org <org>             fork 到指定组织（默认 fork 到当前账号）
-#   --fork-name <name>      重命名 fork（默认沿用原仓库名）
+#   --fork-name <name>      重命名 fork（默认：原仓库名-SafelyFork）
 #   --workflow-file <path>  要推入的 workflow 文件（默认：本仓库根目录的 safely-fork.yml）
 #   --workflow-name <name>  在 fork 中保存的文件名（默认：safely-fork.yml）
 #   --dispatch              完成后立即触发一次 workflow 测试运行
@@ -128,7 +128,7 @@ else
     FORK_OWNER=$(gh api user --jq .login) || die "获取当前登录账号失败"
   fi
 fi
-FORK_REPO="${FORK_NAME:-${REPO#*/}}"
+FORK_REPO="${FORK_NAME:-${REPO#*/}-SafelyFork}"
 FORK="${FORK_OWNER}/${FORK_REPO}"
 
 ok "凭据与依赖就绪（目标 fork: ${FORK}）"
@@ -146,7 +146,7 @@ else
   }
   SRC_BRANCH=$(printf '%s' "$out" | jq -r .default_branch)
   SRC_NAME=$(printf '%s' "$out" | jq -r .name)
-  FORK_REPO="${FORK_NAME:-$SRC_NAME}"
+  FORK_REPO="${FORK_NAME:-${SRC_NAME}-SafelyFork}"
   FORK="${FORK_OWNER}/${FORK_REPO}"
   ok "源仓库默认分支: $SRC_BRANCH"
 fi
