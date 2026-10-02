@@ -172,9 +172,10 @@ if [ -n "$existing" ]; then
     die "仓库 $FORK 已存在，但不是 ${REPO} 的 fork（parent: ${parent:-无}），请换用 --fork-name"
   fi
 else
-  # 走 REST API 而不是 gh repo fork：显式 default_branch_only=false，
-  # 复制全部分支（gh repo fork 默认只复制默认分支）。
-  # name 必须始终传：REST API 不传 name 时会用原仓库名创建 fork。
+  # 走 REST API 并显式 default_branch_only=false，复制全部分支。
+  # 注：gh repo fork 的 --default-branch-only 默认也是 false（网页端的
+  # "Copy the main branch only" 勾选才默认为 true），这里显式传参只是
+  # 让行为不依赖默认值。name 必须始终传：不传时 fork 会沿用原仓库名。
   fork_args=(-F default_branch_only=false -F name="$FORK_REPO")
   [ -n "$FORK_ORG" ] && fork_args+=(-F organization="$FORK_ORG") || true
   if [ "$DRY_RUN" -eq 1 ]; then
